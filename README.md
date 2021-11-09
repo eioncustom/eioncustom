@@ -7,3 +7,6 @@
 eioncustom/eioncustom is a ✨ special ✨ repository because its `README.md` (this file) appears on your GitHub profile.
 You can click the Preview link to take a look at your changes.
 --->
+
+#resolv.conf
+This is my workaround to add local domain search and DNS services to Windows Subsystem for Linux (aka, WSL or WSL2)
