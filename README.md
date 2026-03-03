@@ -17,6 +17,11 @@ This script is to quick check all the PCI Buses in a Multi-GPU Server.
 This script will check for Nvidia DCGM, then fine the Nvidia GPUs present and sequentially run diagnostics against all the GPUs one-by-one.
 Use this if you are getting cascading failures during DCGMI Diags and it isn't obvious which GPU is actually failed. 
 
+## ubuntu_passive_updater.ps1
+Ubuntu Passive Updater via SSH with PowerShell, this will perform Linux Kernel updates via SSH
+Be very careful with this as the updates can fail and leave the kernel in a broken state. 
+
+
 <!---
 eioncustom/eioncustom is a ✨ special ✨ repository because its `README.md` (this file) appears on your GitHub profile.
 You can click the Preview link to take a look at your changes.
