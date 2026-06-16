@@ -1,0 +1,150 @@
+#cloud-config
+# Cloud-init user-data: secure-erase NVMe data drives in parallel, then power off.
+# Targets: /dev/nvme2n1 .. /dev/nvme9n1
+#
+# Flow:
+#   1. Resolve the root device + every ancestor; abort if any target is part
+#      of that chain (so we never wipe the OS disk).
+#   2. Tear down anything sitting on top of each target: unmount filesystems,
+#      swapoff, stop md arrays, deactivate dm/LVM/crypt holders.
+#   3. Zero any md superblock so udev cannot re-assemble the array.
+#   4. In parallel, secure-erase each device:
+#        a. `nvme format --ses=2 --force` (crypto erase, instant)
+#        b. fallback to `nvme format --ses=1 --force` (user-data erase)
+#   5. sync + power off.
+#
+# NOTE: NVMe controller numbering (nvmeXn1) is not guaranteed stable across
+# boots. For a one-shot first-boot wipe this is fine; otherwise pin to
+# /dev/disk/by-id/nvme-<serial>.
+
+package_update: true
+packages:
+  - nvme-cli
+  - util-linux
+  - mdadm
+  - lvm2
+  - cryptsetup
+
+write_files:
+  - path: /usr/local/sbin/shred-nvme.sh
+    permissions: '0755'
+    owner: root:root
+    content: |
+      #!/usr/bin/env bash
+
+      DEVICES=(
+        /dev/nvme2n1
+        /dev/nvme3n1
+        /dev/nvme4n1
+        /dev/nvme5n1
+        /dev/nvme6n1
+        /dev/nvme7n1
+        /dev/nvme8n1
+        /dev/nvme9n1
+
+      )
+
+      for bin in nvme mdadm lsblk findmnt readlink poweroff; do
+        command -v "$bin" >/dev/null 2>&1 || {
+          echo "FATAL: missing required tool: $bin" >&2
+          exit 2
+        }
+      done
+
+      # ---- Build the root-device chain (root FS + every ancestor block dev).
+      root_src=$(findmnt -no SOURCE /) || { echo "FATAL: cannot find root" >&2; exit 2; }
+      [ -n "$root_src" ] || { echo "FATAL: empty root source" >&2; exit 2; }
+      root_src=$(readlink -f "$root_src")
+
+      declare -A ROOT_CHAIN=()
+      ROOT_CHAIN["$root_src"]=1
+      while read -r d; do
+        [ -n "$d" ] && ROOT_CHAIN["$d"]=1
+      done < <(lsblk -spno NAME "$root_src" 2>/dev/null)
+
+      # ---- Refuse the whole run if any target is in the root chain.
+      target_is_root_critical() {
+        local dev="$1" rdev name
+        rdev=$(readlink -f "$dev" 2>/dev/null || echo "$dev")
+        [ -b "$rdev" ] || return 1
+        [ -n "${ROOT_CHAIN[$rdev]:-}" ] && return 0
+        while read -r name; do
+          [ -n "${ROOT_CHAIN[/dev/$name]:-}" ] && return 0
+        done < <(lsblk -nr -o NAME "$rdev")
+        return 1
+      }
+
+      for d in "${DEVICES[@]}"; do
+        if target_is_root_critical "$d"; then
+          echo "ABORT: $d is part of the root device chain; refusing to wipe" >&2
+          exit 3
+        fi
+      done
+
+      # ---- Tear down holders (mounts, swap, md, LVM, dm-crypt) on each target.
+      # Iterate leaf-first so the bottom of the stack gets dismantled before the
+      # block device underneath it.
+      teardown_holders() {
+        local dev="$1" rdev
+        rdev=$(readlink -f "$dev" 2>/dev/null || echo "$dev")
+        [ -b "$rdev" ] || return 0
+
+        local lines line name type full mp
+        mapfile -t lines < <(lsblk -nr -o NAME,TYPE "$rdev" | tac)
+        for line in "${lines[@]}"; do
+          name="${line%% *}"
+          type="${line##* }"
+          full="/dev/$name"
+          [ "$(readlink -f "$full" 2>/dev/null || echo "$full")" = "$rdev" ] && continue
+
+          # Unmount any filesystem mounted from this node.
+          while read -r mp; do
+            [ -n "$mp" ] && { umount "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true; }
+          done < <(findmnt -nr -o TARGET -S "$full" 2>/dev/null)
+
+          swapoff "$full" 2>/dev/null || true
+
+          case "$type" in
+            raid*|md*)
+              mdadm --stop "$full" 2>/dev/null || true
+              ;;
+            lvm)
+              # dm node lives at /dev/dm-N or /dev/mapper/<name>; remove by name.
+              dmsetup remove --force "$name" 2>/dev/null || true
+              ;;
+            crypt)
+              cryptsetup close "$name" 2>/dev/null || true
+              ;;
+          esac
+        done
+
+        # Zero md superblock on the bare device so udev cannot re-assemble.
+        mdadm --zero-superblock --force "$rdev" 2>/dev/null || true
+      }
+
+      # Serialize teardown so two workers don't race on the same shared array.
+      for d in "${DEVICES[@]}"; do
+        teardown_holders "$d"
+      done
+
+      # ---- Parallel secure erase.
+      wipe_one() {
+        local dev="$1"
+        [ -b "$dev" ] || return 0
+        if nvme format "$dev" --ses=2 --force 2>/dev/null; then
+          return 0
+        fi
+        nvme format "$dev" --ses=1 --force --timeout=600000 2>/dev/null
+      }
+
+      for d in "${DEVICES[@]}"; do
+        wipe_one "$d" &
+      done
+      wait
+
+      sync
+      systemctl poweroff --no-block 2>/dev/null || poweroff -f
+      exit 0
+
+runcmd:
+  - [ /usr/local/sbin/shred-nvme.sh ]
