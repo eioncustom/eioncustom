@@ -7,6 +7,19 @@
 
 # Scripts in the Repo
 
+## scan_raw_data.py
+This script is a utility I needed to make for scanning potentially failed disk drives for recoverable data.  
+This runs in a read-only state and will not attempt to recover any bits.  
+You can run this directly on the block device or on a ddrescue disk image.  
+
+* Example output on completion:  
+> Read 1,917,157,638,144 bytes; remaining 3,225,772,032 bytes; nonzero 0; 801.1 MiB/s  
+> Bytes read:    1,920,383,410,176  
+> Bytes remaining: 0  
+> Zero bytes:    1,920,383,410,176  
+> Nonzero bytes: 0 (0.0000%)  
+> Every byte read was zero.  
+
 ## derbytime.sh
 This script is to automate the launch of the CRG Scoreboard System on a Linux System.
 
